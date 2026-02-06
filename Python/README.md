@@ -1,23 +1,225 @@
-File Structure: 
+# FEM2D Python port — README
 
-Python/
-├─ pyproject.toml
-├─ README.md
-├─ src/
-│  └─ fem2d/
-│     ├─ __init__.py
-│     ├─ mesh.py              # mesh IO + data structures (Node, Element, Mesh)
-│     ├─ elements.py          # element classes (base + implementations)
-│     ├─ material.py          # material models (elastic, plastic stubs)
-│     ├─ assemble.py          # element -> global matrix/vector assembly
-│     ├─ boundary.py          # BC application (Dirichlet, Neumann)
-│     ├─ solver.py            # linear solvers + wrappers (scipy, sparse)
-│     ├─ post.py              # postprocessing (contours, exports)
-│     ├─ io.py                # .inp parser + meshio helpers
-│     └─ utils.py             # common helpers, types, constants
-├─ examples/
-│  └─ example_plate.py
-└─ tests/
-   ├─ test_elements.py
-   ├─ test_assembly.py
-   └─ test_integration.py
+This folder contains a step-wise Python port of the Fortran `FEM2DF15.FOR` program.
+The goal is a readable, testable implementation of the core FEM pipeline:
+
+- Input parsing (`io.py`)
+- Mesh generation (`mesh.py`)
+- Material constitutive calculations (`material.py`)
+- Element numerical integration (`elements.py`)
+- Global assembly (`assemble.py`)
+- Boundary condition application (`boundary.py`)
+- Linear solver (`solver.py`)
+- Driver and postprocessing (`driver.py`, `post.py`)
+
+This README documents the modules, the main classes and functions created so far,
+and usage instructions for running the tests and small examples.
+
+-------------------------------------------------------------------------------
+Installation
+-------------------------------------------------------------------------------
+
+Prerequisites
+- Python 3.9+ (the development environment used here is a conda/miniconda Python)
+- NumPy
+- pytest (for running unit tests)
+
+Install dependencies (example):
+
+```powershell
+conda create -n fem2d python=3.10 numpy pytest -y
+conda activate fem2d
+pip install -e .   # if you want to install the Python package locally
+```
+
+-------------------------------------------------------------------------------
+Running tests and examples
+-------------------------------------------------------------------------------
+
+Run the test suite from the `Python` folder:
+
+```powershell
+cd Python
+pytest -q
+```
+
+There is an end-to-end driver `src/driver.py` used by tests; you can also import
+`driver.solve_static` to run a small FEM problem programmatically.
+
+-------------------------------------------------------------------------------
+Module reference (detailed)
+-------------------------------------------------------------------------------
+
+All files referenced are under `Python/src/`.
+
+1) `io.py` — input parsing and data classes
+
+- Dataclasses:
+  - `ProblemType(itype, igrad, item, neign, nvalu=None, nvctr=None)` — basic problem flags.
+  - `ElementMesh(ieltyp, npe, mesh, nprnt, nem=None, nnm=None)` — element/mesh metadata.
+  - `RectangularMesh(nx, ny, x0, y0, dx, dy)` — rectangular mesh description used when `mesh==1`.
+  - `UserMesh(nod, glxy)` — user-supplied connectivity & coordinates.
+  - `BoundaryConditions(ispv, vspv=None, issv=array([],0,2), vssv=None)` — Dirichlet/Neumann storage.
+  - `ConvectionBC(iconv, nbe=None, ibn=None, inod=None, beta=None, tinf=None)` — convection edges.
+  - `PoissonCoefficients(a10,a1x,a1y,a20,a2x,a2y,a00)` — spatially linear diffusion coefficients.
+  - `ElasticityMaterial(e1,e2,anu12,g12,thkns, lnstrs=None, g13=None, g23=None)` — elasticity/plate properties.
+  - `SourceAndLoads(f0, fx, fy)` — body force linear coefficients.
+  - `DynamicParameters(...)` — transient params (present for completeness).
+  - `FEM2DConfig(...)` — top-level config returned by parser.
+
+- Key function:
+  - `read_inp(filepath: str) -> FEM2DConfig`
+    - Parses a Fortran-style `.INP` file following the read sequence from the
+      original Fortran program. Returns a `FEM2DConfig` instance containing
+      mesh description, material data, BCs, and problem flags.
+
+2) `mesh.py` — rectangular mesh generator and normalization
+
+- Functions:
+  - `generate_rectangular_mesh(nx, ny, x0, dx, y0, dy, ieltyp, npe) -> (nod, glxy)`
+    - Builds node coordinates (glxy) and element connectivity (nod) from
+      `nx,ny` subdivisions and arrays `dx,dy` of segment lengths.
+    - The function uses explicit cumulative sums and loops (no `np.meshgrid`),
+      follows the same numbering convention as the original Fortran code
+      (node index = ix + iy * NXX1), and splits rectangles into two
+      triangles when `ieltyp == 0`.
+
+  - `generate_mesh_from_config(config: FEM2DConfig) -> UserMesh`
+    - Normalizes either an auto-generated rectangular mesh (calls
+      `generate_rectangular_mesh`) or a user-supplied mesh in `config.user_mesh`.
+
+3) `material.py` — constitutive matrix computations
+
+- Functions:
+  - `compute_cmat_elasticity(e, nu, plane_stress=True) -> np.ndarray` (3x3)
+    - Computes the 2D elasticity constitutive matrix (`CMAT`) for plane
+      stress/strain using standard formulas. Returns a 3x3 matrix for use in
+      element-level stiffness assembly.
+
+  - `compute_cmat_plate(E, nu, thickness, shear_corr=5/6) -> (Dmat, shear_constants)`
+    - Computes bending stiffness and shear constants for thin-plate models.
+
+4) `elements.py` — elemental matrices (stiffness, load)
+
+- Triangle element (linear, 3-node):
+  - `triangle_shape_derivatives(coords) -> (dNdx, area)` — returns shape function
+    derivatives (2x3) constant across the triangle and the area.
+
+  - `triangle_element_matrices(coords, itype=0, material=None, coeffs=None) -> (ELK, ELF)`
+    - For `itype==0` (Poisson), computes 3x3 stiffness matrix and 3-entry load
+      vector using constant derivatives and area integration for linear terms.
+    - For `itype==2` (plane elasticity), computes a 6x6 stiffness matrix (2 DOF
+      per node) using the B-matrix formulation and returns a 6-entry load vector.
+
+- Quadrilateral element (bilinear, 4-node):
+  - `_quad_shape_functions`, `_quad_shape_derivatives` — standard bilinear shape
+    functions in the natural coordinates (xi,eta).
+  - `quad_element_matrices(coords, itype=0, material=None, coeffs=None) -> (ELK, ELF)`
+    - Uses 2x2 Gauss quadrature to compute stiffness/load for scalar Poisson and
+      vector elasticity (`itype==2`, returning 8x8 matrices for 4-node quads).
+
+- Convenience wrapper:
+  - `element_matrices(coords, npe, itype=0, material=None, coeffs=None)` — dispatches
+    to triangle/quad implementations based on `npe`.
+
+Notes about element implementations:
+- The triangle elasticity element returns a 6x6 matrix (2 DOF per node). The
+  scalar Poisson triangle uses compact 3x3 matrices.
+- The quad element uses a 2x2 Gauss rule and returns 4x4 (scalar) or 8x8
+  (vector) matrices.
+
+5) `assemble.py` — global assembly
+
+- `assemble_global(nod, glxy, npe, ndf, element_func, itype=0, material=None, coeffs=None) -> (K, F)`
+  - Dense assembly routine that builds the full global stiffness matrix `K`
+    and right-hand side vector `F` from per-element matrices.
+  - `nod` is (nem, npe) with 0-based node indices, `glxy` is (nnm,2).
+  - `ndf` is degrees of freedom per node (1 for scalar, 2 for plane elasticity).
+
+6) `boundary.py` — BC application
+
+- `_map_dof(node, local_dof, ndf)` — internal helper mapping Fortran-style
+  1-based `(node,local_dof)` pairs into 0-based global DOF indices.
+
+- `apply_dirichlet_bc(K, F, bc: BoundaryConditions, ndf)`
+  - Applies essential BCs in-place using elimination: zero row/column, set
+    diagonal to 1 and RHS to prescribed value. Expects `bc.ispv` to be
+    Fortran-style arrays (1-based). Works for `ndf >= 1`.
+
+- `apply_neumann_bc(F, bc: BoundaryConditions, ndf)`
+  - Adds natural BC contributions to the RHS vector `F` in-place.
+
+- `apply_convection_bc(K, F, convection: ConvectionBC, nod, glxy, ndf)`
+  - A simple linear edge convection model for scalar problems (adds small
+    2x2 edge matrices to `K` and corresponding RHS terms). Uses boundary
+    node pairs supplied in `convection.inod`.
+
+7) `solver.py` — dense solvers with detailed comments
+
+- `solve_dense(K, F) -> u` — uses `np.linalg.solve` (LU factorization with
+  partial pivoting) to solve K u = F. Includes a conditioning check and
+  documentation about trade-offs between dense and banded/sparse approaches.
+
+- `solve_spd(K, F) -> u` — Cholesky-based solver for symmetric positive
+  definite systems (wraps `np.linalg.cholesky`).
+
+- `residual_norm(K, u, F)` — convenience to compute ||K u - F||_2.
+
+8) `post.py` — postprocessing helpers
+
+- `extract_nodal_field(u, ndf) -> (nnm, ndf)` — reshape global DOF vector
+  into a nodal field array.
+
+- `max_abs_field(u, ndf)` — max absolute DOF value for quick checks.
+
+9) `driver.py` — small end-to-end runner
+
+- `solve_static(nod, glxy, npe, ndf, itype, element_func, material, coeffs, bc, convection)`
+  - Orchestrates: assemble -> apply natural BCs -> apply convection -> apply
+    Dirichlet -> solve -> postprocess. Returns `(u, field)`.
+
+-------------------------------------------------------------------------------
+Design notes and future work
+-------------------------------------------------------------------------------
+
+- Current solver and assembly are dense for simplicity and testability. For
+  large problems, convert `assemble.py` to produce sparse matrices (CSR) and
+  use SciPy's sparse solvers or a banded solver to match the memory/time
+  characteristics of the original Fortran code.
+- Element coverage currently includes linear triangle and bilinear quad
+  elements for scalar and plane elasticity problems. Porting of plate-bending
+  elements and higher-order elements remains to be done.
+- `io.read_inp` implements a tolerant Fortran-style `.INP` parser but does
+  not implement every edge-case; if you have additional sample input files
+  please run them and report parser failures so we can extend the tokenizer.
+
+-------------------------------------------------------------------------------
+Developer notes: running a quick example
+-------------------------------------------------------------------------------
+
+Example: run the built-in driver programmatically
+
+```python
+from src import mesh, elements, driver
+import numpy as np
+
+nx = ny = 1
+dx = np.array([1.0])
+dy = np.array([1.0])
+nod, glxy = mesh.generate_rectangular_mesh(nx, ny, 0.0, dx, 0.0, dy, ieltyp=0, npe=3)
+coeffs = {'A11':1.0,'A22':1.0,'A00':0.0,'F0':1.0}
+u, field = driver.solve_static(nod, glxy, npe=3, ndf=1, itype=0, element_func=elements.element_matrices, coeffs=coeffs)
+print('u=', u)
+```
+
+-------------------------------------------------------------------------------
+Contributing & next steps
+-------------------------------------------------------------------------------
+
+- If you'd like me to continue, suggested next tasks:
+  - implement sparse/banded assembly & banded solver to match Fortran's
+    `EQNSOLVR` performance traits;
+  - add plate bending element implementations matching `ELKMFTRI`/`ELKMFRCT`;
+  - add VTK/VTU export in `post.py` for visualization (pyvista or meshio).
+
+If you want any of these now, tell me which and I'll implement it next.
