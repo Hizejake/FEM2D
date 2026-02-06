@@ -346,12 +346,12 @@ def read_inp(filepath: str) -> FEM2DConfig:
         FileNotFoundError: If input file not found
         ValueError: If file format is invalid
     """
-    filepath = Path(filepath)
-    if not filepath.exists():
+    filepath = Path(filepath)   # type: ignore
+    if not filepath.exists():   # type: ignore
         raise FileNotFoundError(f"Input file not found: {filepath}")
     
     # Tokenize entire file (whitespace-separated, skip comments)
-    tokens = _tokenize_file(filepath)
+    tokens = _tokenize_file(filepath)   # type: ignore
     idx = 0
     
     # ========== BLOCK 1: Title and Problem Type ==========
