@@ -16,6 +16,16 @@ from typing import Tuple, Optional
 import numpy as np
 
 
+def _ndf_for_itype(itype: int) -> int:
+    if itype == 0:
+        return 1
+    if itype == 2:
+        return 2
+    if itype in (3, 4):
+        return 3
+    raise NotImplementedError(f"ITYPE {itype} not implemented")
+
+
 def _area_of_triangle(coords: np.ndarray) -> float:
     x1, y1 = coords[0]
     x2, y2 = coords[1]
@@ -162,8 +172,9 @@ def quad_element_matrices(coords: np.ndarray,
     if coords.shape != (4, 2):
         raise ValueError("coords must be (4,2) for quad")
     nn = 4
-    ELK = np.zeros((nn * (1 if itype == 0 else 2), nn * (1 if itype == 0 else 2)), dtype=float)  # type: ignore
-    ELF = np.zeros(nn * (1 if itype == 0 else 2), dtype=float)  # type: ignore
+    ndf = _ndf_for_itype(itype)
+    ELK = np.zeros((nn * ndf, nn * ndf), dtype=float)
+    ELF = np.zeros(nn * ndf, dtype=float)
 
     # 2x2 Gauss points
     gauss = [(-1/np.sqrt(3), -1/np.sqrt(3)), (1/np.sqrt(3), -1/np.sqrt(3)),
@@ -226,8 +237,72 @@ def quad_element_matrices(coords: np.ndarray,
             for a in range(4):
                 ELF[2*a] += F0 * N[a] * detJ
                 ELF[2*a+1] += 0.0
+        elif itype in (3, 4):
+            # Mindlin plate with DOFs [w, theta_x, theta_y] at each node.
+            Bb = np.zeros((3, 12), dtype=float)
+            for a in range(4):
+                ia = 3 * a
+                Bb[0, ia + 1] = dNdx[0, a]
+                Bb[1, ia + 2] = dNdx[1, a]
+                Bb[2, ia + 1] = dNdx[1, a]
+                Bb[2, ia + 2] = dNdx[0, a]
+
+            if isinstance(material, dict):
+                D_b = np.asarray(material.get('CMAT', np.eye(3)), dtype=float)
+            else:
+                D_b = np.asarray(material if material is not None else np.eye(3), dtype=float)
+            ELK += Bb.T @ D_b @ Bb * detJ
+
+            F0 = coeffs.get('F0', 0.0) if coeffs else 0.0
+            FX = coeffs.get('FX', 0.0) if coeffs else 0.0
+            FY = coeffs.get('FY', 0.0) if coeffs else 0.0
+            xg = sum(N[a] * coords[a, 0] for a in range(4))
+            yg = sum(N[a] * coords[a, 1] for a in range(4))
+            q = F0 + FX * xg + FY * yg
+            for a in range(4):
+                ELF[3 * a] += q * N[a] * detJ
         else:
             raise NotImplementedError(f"ITYPE {itype} not implemented for quad")
+
+    if itype in (3, 4):
+        # Reduced integration for shear terms to limit locking.
+        xi = 0.0
+        eta = 0.0
+        weight = 4.0
+        N = _quad_shape_functions(xi, eta)
+        dNdxi, dNdeta = _quad_shape_derivatives(xi, eta)
+        J = np.zeros((2, 2), dtype=float)
+        for a in range(4):
+            J[0, 0] += dNdxi[a] * coords[a, 0]
+            J[0, 1] += dNdxi[a] * coords[a, 1]
+            J[1, 0] += dNdeta[a] * coords[a, 0]
+            J[1, 1] += dNdeta[a] * coords[a, 1]
+        detJ = np.linalg.det(J)
+        if detJ <= 0:
+            raise ValueError("Jacobian determinant non-positive for quad element")
+        invJ = np.linalg.inv(J)
+        dNdx = np.zeros((2, 4))
+        for a in range(4):
+            grad = invJ @ np.array([dNdxi[a], dNdeta[a]])
+            dNdx[0, a] = grad[0]
+            dNdx[1, a] = grad[1]
+
+        Bs = np.zeros((2, 12), dtype=float)
+        for a in range(4):
+            ia = 3 * a
+            Bs[0, ia] = dNdx[0, a]
+            Bs[0, ia + 1] = N[a]
+            Bs[1, ia] = dNdx[1, a]
+            Bs[1, ia + 2] = N[a]
+
+        if isinstance(material, dict):
+            c44 = float(material.get('C44', 0.0))
+            c55 = float(material.get('C55', 0.0))
+        else:
+            c44 = 0.0
+            c55 = 0.0
+        D_s = np.array([[c55, 0.0], [0.0, c44]], dtype=float)
+        ELK += Bs.T @ D_s @ Bs * detJ * weight
 
     return ELK, ELF
 
@@ -270,6 +345,19 @@ def triangle_element_mass(coords: np.ndarray,
                 M2[2 * a, 2 * b] = ELM[a, b]
                 M2[2 * a + 1, 2 * b + 1] = ELM[a, b]
         return M2
+    if itype in (3, 4):
+        MX = dyn.get('CX', C0) if dyn else C0
+        MY = dyn.get('CY', C0) if dyn else C0
+        M3 = np.zeros((9, 9), dtype=float)
+        for a in range(3):
+            for b in range(3):
+                S00 = (1.0 / 3.0) if a == b else (1.0 / 6.0)
+                ia = 3 * a
+                ib = 3 * b
+                M3[ia, ib] = CT * S00 * area
+                M3[ia + 1, ib + 1] = MX * S00 * area
+                M3[ia + 2, ib + 2] = MY * S00 * area
+        return M3
     return ELM
 
 
@@ -282,7 +370,7 @@ def quad_element_mass(coords: np.ndarray,
     if coords.shape != (4, 2):
         raise ValueError("coords must be (4,2) for quad")
     nn = 4
-    nvars = nn * (1 if itype == 0 else 2)
+    nvars = nn * _ndf_for_itype(itype)
     ELM = np.zeros((nvars, nvars), dtype=float)
     # default dyn coefficients
     C0 = dyn.get('C0', 1.0) if dyn else 1.0
@@ -312,10 +400,13 @@ def quad_element_mass(coords: np.ndarray,
                 mass_ij = N[i] * N[j] * CT * detJ
                 if itype == 0:
                     ELM[i, j] += mass_ij
-                else:
-                    # map to DOFs
+                elif itype == 2:
                     ELM[2 * i, 2 * j] += mass_ij
                     ELM[2 * i + 1, 2 * j + 1] += mass_ij
+                elif itype in (3, 4):
+                    ELM[3 * i, 3 * j] += mass_ij
+                    ELM[3 * i + 1, 3 * j + 1] += N[i] * N[j] * CX * detJ
+                    ELM[3 * i + 2, 3 * j + 2] += N[i] * N[j] * CY * detJ
     return ELM
 
 # Convenience wrapper selecting by NPE
@@ -331,3 +422,5 @@ def element_matrices(coords: np.ndarray, npe: int, itype: int = 0,
     if npe == 4:
         return quad_element_matrices(coords, itype, material, coeffs or {})
     raise NotImplementedError(f"Element with NPE={npe} not implemented")
+
+

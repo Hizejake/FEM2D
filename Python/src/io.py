@@ -551,14 +551,15 @@ def read_inp(filepath: str) -> FEM2DConfig:
             
             material = ElasticityMaterial(e1, e2, anu12, g12, thkns, g13=g13, g23=g23)
     
-    # ========== BLOCK 6: Convection BC (optional) ==========
-    # Fortran line 269: READ(IN,*) ICONV
-    iconv = int(tokens[idx])
-    idx += 1
-    
-    convection = ConvectionBC(iconv)
-    
-    if iconv != 0:
+    # ========== BLOCK 6: Convection BC (optional; ITYPE==0 only) ==========
+    convection = ConvectionBC(0)
+    if itype == 0:
+        # Fortran line 269: READ(IN,*) ICONV (inside ITYPE==0 branch)
+        iconv = int(tokens[idx])
+        idx += 1
+        convection = ConvectionBC(iconv)
+
+    if itype == 0 and convection.iconv != 0:
         # Fortran line 271: READ(IN,*) NBE
         nbe = int(tokens[idx])
         idx += 1
@@ -656,6 +657,18 @@ def read_inp(filepath: str) -> FEM2DConfig:
         cx = float(tokens[idx + 1])
         cy = float(tokens[idx + 2])
         idx += 3
+
+        # Match Fortran scaling of dynamic coefficients for solid/plate problems.
+        if material is not None and itype > 1:
+            thkns = material.thkns
+            if itype == 2:
+                c0 = thkns * c0
+                cx = thkns * cx
+                cy = thkns * cy
+            else:
+                c0 = thkns * c0
+                cx = (thkns ** 2) * c0 / 12.0
+                cy = cx
         
         # Fortran line ~332: READ(IN,*) NTIME, NSTP, INTVL, INTIAL
         ntime = int(tokens[idx])

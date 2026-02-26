@@ -53,6 +53,7 @@ def test_dynamic_initial_acceleration_includes_damping():
     dyn_base = {
         'C0': 1.0, 'CX': 0.0, 'CY': 0.0,
         'ntime': 1, 'dt': 1.0, 'alfa': 0.25, 'gama': 0.5,
+        'intial': 1,
         'initial_u': np.zeros(4), 'initial_v': init_v,
         'damping': {'alpha': 1.0, 'beta': 0.0},
     }

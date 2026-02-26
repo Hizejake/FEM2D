@@ -10,13 +10,16 @@ This is a minimal convenience wrapper used by tests and examples. It performs:
 
 The driver intentionally keeps a clear sequence to mirror the Fortran program flow.
 """
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Any
 import numpy as np
 from .assemble import assemble_global, assemble_mass_global
 from .boundary import apply_neumann_bc, apply_convection_bc, apply_dirichlet_bc, _map_dof
 from .solver import solve_dense
 from .post import extract_nodal_field
-from .io import BoundaryConditions, ConvectionBC
+from .io import BoundaryConditions, ConvectionBC, read_inp
+from .mesh import generate_mesh_from_config
+from .material import compute_cmat_from_config
+from . import elements
 
 
 def solve_static(nod: np.ndarray,
@@ -69,20 +72,12 @@ def solve_dynamic(nod: np.ndarray,
                   bc: Optional[BoundaryConditions] = None,
                   convection: Optional[ConvectionBC] = None,
                   dyn: Optional[dict] = None) -> Tuple[np.ndarray, np.ndarray]:
-    """Perform simple Newmark-beta time integration for dynamic problems.
-
-    `dyn` is expected to contain keys from `DynamicParameters` dataclass such
-    as c0,cx,cy,ntime,nstp,dt,alfa,gama,initial_u,initial_v,initial_a.
-
-    Returns the final displacement vector and nodal field; history can be
-    obtained by calling this repeatedly or modifying the function to store it.
-    """
-    # assemble stiffness and mass
+    """Perform dynamic integration following the Fortran TEMPORAL() workflow."""
     K, F = assemble_global(nod, glxy, npe, ndf, element_func, itype, material, coeffs)  # type: ignore
     if mass_func is None:
         raise ValueError("mass_func must be provided for dynamic analysis")
     M = assemble_mass_global(nod, glxy, npe, ndf, mass_func, itype, coeffs, dyn)  # type: ignore
-    # Optionally assemble Rayleigh damping matrix C = alpha*M + beta*K if provided
+
     C = None
     if dyn is not None and 'damping' in dyn:
         damp = dyn['damping']
@@ -90,60 +85,137 @@ def solve_dynamic(nod: np.ndarray,
         beta = damp.get('beta', 0.0)
         if alpha != 0.0 or beta != 0.0:
             C = alpha * M + beta * K
-    # mass_func cannot be element_func; user should pass separate function? use element_mass...
-    # to keep simple we assume element_func has an attribute 'mass' or external
 
-    # apply BCs to K,F,M (and C if present)
     if bc is not None:
         apply_neumann_bc(F, bc, ndf)
     if convection is not None:
         apply_convection_bc(K, F, convection, nod=nod, glxy=glxy, ndf=ndf)
     if bc is not None:
         apply_dirichlet_bc(K, F, bc, ndf)
-        # also modify mass & damping: zero rows/cols of fixed DOFs
         for i in range(bc.ispv.shape[0]):
-            g = _map_dof(bc.ispv[i,0], bc.ispv[i,1], ndf)
-            M[g,:] = 0.0
-            M[:,g] = 0.0
-            M[g,g] = 1.0
+            g = _map_dof(bc.ispv[i, 0], bc.ispv[i, 1], ndf)
+            M[g, :] = 0.0
+            M[:, g] = 0.0
+            M[g, g] = 1.0
             if C is not None:
-                C[g,:] = 0.0
-                C[:,g] = 0.0
-                C[g,g] = 1.0
+                C[g, :] = 0.0
+                C[:, g] = 0.0
+                C[g, g] = 1.0
 
-    # initial conditions
     u = dyn.get('initial_u', np.zeros(K.shape[0])) if dyn else np.zeros(K.shape[0])
     v = dyn.get('initial_v', np.zeros_like(u)) if dyn else np.zeros_like(u)
     a = dyn.get('initial_a', None) if dyn else None
+    intial = dyn.get('intial', 0) if dyn else 0
     if a is None:
-        damping_term = C @ v if C is not None else 0.0
-        a = solve_dense(M, F - K @ u - damping_term)
+        if intial == 0:
+            a = np.zeros_like(u)
+        else:
+            damping_term = C @ v if C is not None else 0.0
+            a = solve_dense(M, F - K @ u - damping_term)
     dt = dyn.get('dt', 1.0) if dyn else 1.0
-    beta = dyn.get('alfa', 0.25) if dyn else 0.25
-    gamma = dyn.get('gama', 0.5) if dyn else 0.5
+    alfa = dyn.get('alfa', 0.25) if dyn else 0.25
+    gama = dyn.get('gama', 0.5) if dyn else 0.5
     ntime = dyn.get('ntime', 1) if dyn else 1
-    # coefficients
-    a0 = 1.0 / (beta * dt * dt)
-    a1 = gamma / (beta * dt)
-    a2 = 1.0 / (beta * dt)
-    a3 = 1.0 / (2 * beta) - 1
-    a4 = gamma / beta - 1
-    a5 = dt * (gamma / (2 * beta) - 1)
-    # effective stiffness including Rayleigh damping if present
-    Keff = K + a0 * M
+    nstp = dyn.get('nstp', ntime + 1) if dyn else ntime + 1
+
+    A1 = alfa * dt
+    A2 = (1.0 - alfa) * dt
+    DT2 = dt * dt
+    A3 = 2.0 / (gama * DT2)
+    A4 = A3 * dt
+    A5 = 1.0 / gama - 1.0
+
+    Khat = K + A3 * M
     if C is not None:
-        # add damping contribution to effective stiffness
-        Keff = Keff + a1 * C
-    u_next = u.copy()
-    v_next = v.copy()
-    a_next = a.copy()
-    for step in range(ntime):
-        rhs = F + M @ (a0 * u + a2 * v + a3 * a)
+        Khat = Khat + A4 * C
+
+    for step in range(1, ntime + 1):
+        F_step = F if step < nstp else np.zeros_like(F)
+        rhs = F_step + M @ (A3 * u + A4 * v + A5 * a)
         if C is not None:
-            rhs = rhs + C @ (a1 * u + a4 * v + a5 * a)
-        u_next = solve_dense(Keff, rhs)
-        v_next = a1 * (u_next - u) - a4 * v - a5 * a
-        a_next = a0 * (u_next - u) - a2 * v - a3 * a
+            rhs = rhs + C @ v
+        u_next = solve_dense(Khat, rhs)
+        a_next = A3 * (u_next - u) - A4 * v - A5 * a
+        v_next = v + A1 * a_next + A2 * a
         u, v, a = u_next, v_next, a_next
+
     field = extract_nodal_field(u, ndf)
     return u, field
+
+
+def solve_from_inp(filepath: str) -> Tuple[np.ndarray, np.ndarray, Any]:
+    """Parse an INP file and solve using the matching static/dynamic path."""
+    cfg = read_inp(filepath)
+    mesh = generate_mesh_from_config(cfg)
+
+    coeffs = {}
+    if cfg.source_loads is not None:
+        coeffs = {'F0': cfg.source_loads.f0, 'FX': cfg.source_loads.fx, 'FY': cfg.source_loads.fy}
+
+    material = None
+    if cfg.material is not None and cfg.problem_type.itype >= 2:
+        cm = compute_cmat_from_config(
+            cfg.problem_type.itype,
+            cfg.material.lnstrs,
+            cfg.material.e1,
+            cfg.material.e2,
+            cfg.material.anu12,
+            cfg.material.g12,
+            cfg.material.thkns,
+            cfg.material.g13,
+            cfg.material.g23,
+        )
+        if cfg.problem_type.itype in (3, 4):
+            material = {'CMAT': cm.cmat, 'C44': cm.c44 or 0.0, 'C55': cm.c55 or 0.0}
+        else:
+            material = cm.cmat
+
+    if cfg.problem_type.item != 0:
+        dyn = {
+            'C0': cfg.dynamic.c0 if cfg.dynamic else 1.0,
+            'CX': cfg.dynamic.cx if cfg.dynamic else 0.0,
+            'CY': cfg.dynamic.cy if cfg.dynamic else 0.0,
+            'ntime': cfg.dynamic.ntime if cfg.dynamic else 1,
+            'nstp': cfg.dynamic.nstp if cfg.dynamic else 2,
+            'intial': cfg.dynamic.intial if cfg.dynamic else 0,
+            'dt': cfg.dynamic.dt if cfg.dynamic else 1.0,
+            'alfa': cfg.dynamic.alfa if cfg.dynamic else 0.25,
+            'gama': cfg.dynamic.gama if cfg.dynamic else 0.5,
+        }
+        if cfg.dynamic and cfg.dynamic.initial_u is not None:
+            dyn['initial_u'] = cfg.dynamic.initial_u
+        if cfg.dynamic and cfg.dynamic.initial_v is not None:
+            dyn['initial_v'] = cfg.dynamic.initial_v
+        if cfg.dynamic and cfg.dynamic.initial_a is not None:
+            dyn['initial_a'] = cfg.dynamic.initial_a
+
+        mass_func = elements.triangle_element_mass if cfg.element_mesh.npe == 3 else elements.quad_element_mass
+        u, field = solve_dynamic(
+            mesh.nod,
+            mesh.glxy,
+            cfg.element_mesh.npe,
+            cfg.ndf,
+            cfg.problem_type.itype,
+            element_func=elements.element_matrices,
+            mass_func=mass_func,
+            material=material,
+            coeffs=coeffs,
+            bc=cfg.boundary_conditions,
+            convection=cfg.convection,
+            dyn=dyn,
+        )
+    else:
+        u, field = solve_static(
+            mesh.nod,
+            mesh.glxy,
+            cfg.element_mesh.npe,
+            cfg.ndf,
+            cfg.problem_type.itype,
+            element_func=elements.element_matrices,
+            material=material,
+            coeffs=coeffs,
+            bc=cfg.boundary_conditions,
+            convection=cfg.convection,
+        )
+    return u, field, cfg
+
