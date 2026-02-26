@@ -24,6 +24,16 @@ def test_apply_dirichlet():
     assert np.allclose(K[0,1], 0.0)
 
 
+def test_apply_dirichlet_nonzero_rhs_correction():
+    K = np.array([[2.0, 1.0], [1.0, 2.0]])
+    F = np.array([0.0, 0.0])
+    bc = BoundaryConditions(ispv=np.array([[2, 1]]), vspv=np.array([5.0]))
+    boundary.apply_dirichlet_bc(K, F, bc, ndf=1)
+    # Remaining free equation must include -K[:,g]*u_g contribution.
+    assert np.isclose(F[0], -5.0)
+    assert np.isclose(F[1], 5.0)
+
+
 def test_apply_neumann():
     F = np.zeros(3)
     bc = BoundaryConditions(ispv = np.array([]).reshape(0,2), issv = np.array([[3,1]]), vssv = np.array([2.5]))

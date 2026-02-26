@@ -82,29 +82,42 @@ def solve_dynamic(nod: np.ndarray,
     if mass_func is None:
         raise ValueError("mass_func must be provided for dynamic analysis")
     M = assemble_mass_global(nod, glxy, npe, ndf, mass_func, itype, coeffs, dyn)  # type: ignore
+    # Optionally assemble Rayleigh damping matrix C = alpha*M + beta*K if provided
+    C = None
+    if dyn is not None and 'damping' in dyn:
+        damp = dyn['damping']
+        alpha = damp.get('alpha', 0.0)
+        beta = damp.get('beta', 0.0)
+        if alpha != 0.0 or beta != 0.0:
+            C = alpha * M + beta * K
     # mass_func cannot be element_func; user should pass separate function? use element_mass...
     # to keep simple we assume element_func has an attribute 'mass' or external
 
-    # apply BCs to K,F,M
+    # apply BCs to K,F,M (and C if present)
     if bc is not None:
         apply_neumann_bc(F, bc, ndf)
     if convection is not None:
         apply_convection_bc(K, F, convection, nod=nod, glxy=glxy, ndf=ndf)
     if bc is not None:
         apply_dirichlet_bc(K, F, bc, ndf)
-        # also modify mass: zero rows/cols of fixed DOFs
+        # also modify mass & damping: zero rows/cols of fixed DOFs
         for i in range(bc.ispv.shape[0]):
             g = _map_dof(bc.ispv[i,0], bc.ispv[i,1], ndf)
             M[g,:] = 0.0
             M[:,g] = 0.0
             M[g,g] = 1.0
+            if C is not None:
+                C[g,:] = 0.0
+                C[:,g] = 0.0
+                C[g,g] = 1.0
 
     # initial conditions
     u = dyn.get('initial_u', np.zeros(K.shape[0])) if dyn else np.zeros(K.shape[0])
     v = dyn.get('initial_v', np.zeros_like(u)) if dyn else np.zeros_like(u)
     a = dyn.get('initial_a', None) if dyn else None
     if a is None:
-        a = solve_dense(M, F - K @ u)
+        damping_term = C @ v if C is not None else 0.0
+        a = solve_dense(M, F - K @ u - damping_term)
     dt = dyn.get('dt', 1.0) if dyn else 1.0
     beta = dyn.get('alfa', 0.25) if dyn else 0.25
     gamma = dyn.get('gama', 0.5) if dyn else 0.5
@@ -116,12 +129,18 @@ def solve_dynamic(nod: np.ndarray,
     a3 = 1.0 / (2 * beta) - 1
     a4 = gamma / beta - 1
     a5 = dt * (gamma / (2 * beta) - 1)
+    # effective stiffness including Rayleigh damping if present
     Keff = K + a0 * M
+    if C is not None:
+        # add damping contribution to effective stiffness
+        Keff = Keff + a1 * C
     u_next = u.copy()
     v_next = v.copy()
     a_next = a.copy()
     for step in range(ntime):
         rhs = F + M @ (a0 * u + a2 * v + a3 * a)
+        if C is not None:
+            rhs = rhs + C @ (a1 * u + a4 * v + a5 * a)
         u_next = solve_dense(Keff, rhs)
         v_next = a1 * (u_next - u) - a4 * v - a5 * a
         a_next = a0 * (u_next - u) - a2 * v - a3 * a

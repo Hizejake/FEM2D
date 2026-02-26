@@ -1,0 +1,6 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+Python/fort_output.txt
+inputs/fortran_viscous.inp

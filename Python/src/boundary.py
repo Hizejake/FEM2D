@@ -33,15 +33,23 @@ def apply_dirichlet_bc(K: np.ndarray, F: np.ndarray, bc: BoundaryConditions, ndf
     if vspv is None:
         vspv = np.zeros(ispv.shape[0], dtype=float)
 
+    prescribed = []
     for i in range(ispv.shape[0]):
         node = ispv[i, 0]
         ldof = ispv[i, 1]
         g = _map_dof(node, ldof, ndf)
+        prescribed.append((g, float(vspv[i])))
+
+    # Correct RHS for non-zero prescribed values before zeroing columns.
+    for g, value in prescribed:
+        F[:] -= K[:, g] * value
+
+    for g, value in prescribed:
         # zero row and column
         K[g, :] = 0.0
         K[:, g] = 0.0
         K[g, g] = 1.0
-        F[g] = float(vspv[i])
+        F[g] = value
 
 
 def apply_neumann_bc(F: np.ndarray, bc: BoundaryConditions, ndf: int) -> None:

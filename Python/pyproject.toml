@@ -33,4 +33,4 @@ Homepage = "https://github.com/yourusername/fem2d"
 Repository = "https://github.com/yourusername/fem2d.git"
 
 [tool.setuptools]
-packages = ["fem2d"]
+packages = ["src"]

@@ -572,39 +572,65 @@ def read_inp(filepath: str) -> FEM2DConfig:
         # Format B (grouped): IBN(float beta), BETA, TINF, ..., then INOD values
         # Format A (interleaved): IBN, INOD1, INOD2, BETA, TINF, ...
         
-        is_grouped_format = False
-        try:
-            # Try Format B: read first element as (int, float, float)
-            tok1 = int(tokens[idx])
-            tok2 = float(tokens[idx + 1])
-            tok3 = float(tokens[idx + 2])
-            # If second token has decimal point, it's likely BETA (Format B)
-            if '.' in tokens[idx + 1]:
-                is_grouped_format = True
-        except (ValueError, IndexError):
-            is_grouped_format = False
-        
-        if is_grouped_format:
-            # Format B: grouped (all IBN/BETA/TINF, then all INOD)
-            for i in range(nbe):
-                ibn[i] = int(tokens[idx])
-                beta[i] = float(tokens[idx + 1])
-                tinf[i] = float(tokens[idx + 2])
-                idx += 3
-            # Now read INOD values
-            for i in range(nbe):
-                inod[i, 0] = int(tokens[idx])
-                inod[i, 1] = int(tokens[idx + 1])
-                idx += 2
-        else:
-            # Format A: interleaved (IBN, INOD, INOD, BETA, TINF)
-            for i in range(nbe):
-                ibn[i] = int(tokens[idx])
-                inod[i, 0] = int(tokens[idx + 1])
-                inod[i, 1] = int(tokens[idx + 2])
-                beta[i] = float(tokens[idx + 3])
-                tinf[i] = float(tokens[idx + 4])
-                idx += 5
+        def _int_from_token(tok: str) -> int:
+            val = float(tok)
+            if not np.isfinite(val) or abs(val - round(val)) > 1e-9:
+                raise ValueError(f"Expected integer-valued token, got {tok!r}")
+            return int(round(val))
+
+        def _parse_convection_records(start_idx: int, mode: str) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int]:
+            loc_idx = start_idx
+            ibn_arr = np.zeros(nbe, dtype=int)
+            inod_arr = np.zeros((nbe, 2), dtype=int)
+            beta_arr = np.zeros(nbe, dtype=float)
+            tinf_arr = np.zeros(nbe, dtype=float)
+
+            if mode == "interleaved":
+                for i in range(nbe):
+                    ibn_arr[i] = _int_from_token(tokens[loc_idx])
+                    inod_arr[i, 0] = _int_from_token(tokens[loc_idx + 1])
+                    inod_arr[i, 1] = _int_from_token(tokens[loc_idx + 2])
+                    beta_arr[i] = float(tokens[loc_idx + 3])
+                    tinf_arr[i] = float(tokens[loc_idx + 4])
+                    loc_idx += 5
+            elif mode == "grouped":
+                for i in range(nbe):
+                    ibn_arr[i] = _int_from_token(tokens[loc_idx])
+                    beta_arr[i] = float(tokens[loc_idx + 1])
+                    tinf_arr[i] = float(tokens[loc_idx + 2])
+                    loc_idx += 3
+                for i in range(nbe):
+                    inod_arr[i, 0] = _int_from_token(tokens[loc_idx])
+                    inod_arr[i, 1] = _int_from_token(tokens[loc_idx + 1])
+                    loc_idx += 2
+            else:
+                raise ValueError(f"Unknown convection parse mode: {mode}")
+
+            return ibn_arr, inod_arr, beta_arr, tinf_arr, loc_idx
+
+        def _score_convection_parse(ibn_arr: np.ndarray, inod_arr: np.ndarray) -> int:
+            score = 0
+            if element_mesh.nem is not None:
+                score += 2 if np.all((ibn_arr >= 1) & (ibn_arr <= element_mesh.nem)) else -2
+            if element_mesh.nnm is not None:
+                score += 3 if np.all((inod_arr >= 1) & (inod_arr <= element_mesh.nnm)) else -3
+            return score
+
+        candidates = []
+        for mode in ("interleaved", "grouped"):
+            try:
+                parsed = _parse_convection_records(idx, mode)
+                candidates.append((_score_convection_parse(parsed[0], parsed[1]), mode, parsed))
+            except (ValueError, IndexError):
+                continue
+
+        if not candidates:
+            raise ValueError("Unable to parse convection boundary records")
+
+        # Prefer canonical Fortran interleaved format on ties.
+        candidates.sort(key=lambda item: (item[0], item[1] == "interleaved"), reverse=True)
+        _, _, best = candidates[0]
+        ibn, inod, beta, tinf, idx = best
         
         convection.nbe = nbe
         convection.ibn = ibn
