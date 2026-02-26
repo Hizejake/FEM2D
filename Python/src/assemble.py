@@ -63,3 +63,43 @@ def assemble_global(nod: np.ndarray,
                 K[I, J] += ELK[i_local, j_local]
 
     return K, F
+
+
+def assemble_mass_global(nod: np.ndarray,
+                         glxy: np.ndarray,
+                         npe: int,
+                         ndf: int,
+                         mass_func: Callable,
+                         itype: int = 0,
+                         coeffs: Optional[dict] = None,
+                         dyn: Optional[dict] = None) -> np.ndarray:
+    """
+    Assemble global mass matrix using element-level mass_func.
+
+    mass_func should have signature similar to element_mass, returning a
+    local mass matrix (possibly including DOF expansion for vector problems).
+    """
+    nod = np.asarray(nod, dtype=int)
+    glxy = np.asarray(glxy, dtype=float)
+    nem = nod.shape[0]
+    nnm = glxy.shape[0]
+    neq = nnm * ndf
+
+    M = np.zeros((neq, neq), dtype=float)
+    for e in range(nem):
+        el_nodes = nod[e]
+        coords = glxy[el_nodes]
+        # mass_func signature typically (coords, itype, coeffs?, dyn?)
+        ELM = mass_func(coords, itype=itype, dyn=dyn)  # type: ignore
+        ndof_e = ELM.shape[0]
+        if ndf == 1:
+            gidx = el_nodes
+        else:
+            gidx = np.zeros(ndof_e, dtype=int)
+            for a, node in enumerate(el_nodes):
+                for d in range(ndf):
+                    gidx[ndf * a + d] = node * ndf + d
+        for i_local, I in enumerate(gidx):
+            for j_local, J in enumerate(gidx):
+                M[I, J] += ELM[i_local, j_local]
+    return M

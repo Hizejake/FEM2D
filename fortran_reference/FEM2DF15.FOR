@@ -139,8 +139,9 @@ C
       IN=5
       ITT=6
 C     ***************************************************************
-      open (in,file = ' ')
-      open (itt,file = ' ')
+C     Using standard I/O units: unit 5 is standard input and unit 6 is
+C     standard output on most Fortran runtimes. Avoid opening blank
+C     filenames which can cause runtime errors with modern compilers.
 C     ***************************************************************
       CALL DATAECHO(IN,ITT)
       ICONV=0
@@ -2512,7 +2513,7 @@ C     GDSF(J,I)....Derivative of SF(I) with respect to  X if J=1 and
 C                  and  Y  if J=2
 C     XNODE(I,J)...J-TH (J=1,2) Coordinate of node I of the element
 C     NP(I)........Array of element nodes (used to define SF and DSF)
-C     GJ(I,J)...…Determinant of the Jacobian matrix
+C     GJ(I,J)...ï¿½Determinant of the Jacobian matrix
 C     GJINV(I,J)...Inverse of the jacobian matrix
 C     ________________________________________________________________
 C

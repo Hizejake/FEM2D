@@ -232,10 +232,100 @@ def quad_element_matrices(coords: np.ndarray,
     return ELK, ELF
 
 
+# --- mass matrix routines for dynamic analysis ---
+def triangle_element_mass(coords: np.ndarray,
+                           itype: int = 0,
+                           coeffs: Optional[dict] = None,
+                           dyn: Optional[dict] = None) -> np.ndarray:
+    """Return element mass matrix for linear triangle.
+
+    * `coeffs` is ignored (stiffness information).
+    * `dyn` may provide material density coefficients C0, CX, CY (spatially
+      linear density). If `dyn` is None or missing values, density is taken as
+      1.0.
+    """
+    coords = np.asarray(coords, dtype=float)
+    if coords.shape != (3, 2):
+        raise ValueError("coords must be (3,2) for triangle")
+
+    # compute centroid and area
+    centroid = coords.mean(axis=0)
+    area = _area_of_triangle(coords)
+    C0 = dyn.get('C0', 1.0) if dyn else 1.0
+    CX = dyn.get('CX', 0.0) if dyn else 0.0
+    CY = dyn.get('CY', 0.0) if dyn else 0.0
+    CT = C0 + CX * centroid[0] + CY * centroid[1]
+
+    nn = 3
+    ELM = np.zeros((nn, nn), dtype=float)
+    for i in range(nn):
+        for j in range(nn):
+            S00 = (1.0 / 3.0) if i == j else (1.0 / 6.0)
+            ELM[i, j] = CT * S00 * area
+    # if elasticity, expand to 2*nn x 2*nn, mass on diagonal DOFs
+    if itype == 2:
+        M2 = np.zeros((6, 6), dtype=float)
+        for a in range(3):
+            for b in range(3):
+                M2[2 * a, 2 * b] = ELM[a, b]
+                M2[2 * a + 1, 2 * b + 1] = ELM[a, b]
+        return M2
+    return ELM
+
+
+def quad_element_mass(coords: np.ndarray,
+                       itype: int = 0,
+                       coeffs: Optional[dict] = None,
+                       dyn: Optional[dict] = None) -> np.ndarray:
+    """Return element mass matrix for bilinear quad using 2x2 Gauss rule."""
+    coords = np.asarray(coords, dtype=float)
+    if coords.shape != (4, 2):
+        raise ValueError("coords must be (4,2) for quad")
+    nn = 4
+    nvars = nn * (1 if itype == 0 else 2)
+    ELM = np.zeros((nvars, nvars), dtype=float)
+    # default dyn coefficients
+    C0 = dyn.get('C0', 1.0) if dyn else 1.0
+    CX = dyn.get('CX', 0.0) if dyn else 0.0
+    CY = dyn.get('CY', 0.0) if dyn else 0.0
+
+    gauss = [(-1/np.sqrt(3), -1/np.sqrt(3)), (1/np.sqrt(3), -1/np.sqrt(3)),
+             (1/np.sqrt(3), 1/np.sqrt(3)), (-1/np.sqrt(3), 1/np.sqrt(3))]
+
+    for xi, eta in gauss:
+        N = _quad_shape_functions(xi, eta)
+        dNdxi, dNdeta = _quad_shape_derivatives(xi, eta)
+        J = np.zeros((2, 2), dtype=float)
+        for a in range(4):
+            J[0, 0] += dNdxi[a] * coords[a, 0]
+            J[0, 1] += dNdxi[a] * coords[a, 1]
+            J[1, 0] += dNdeta[a] * coords[a, 0]
+            J[1, 1] += dNdeta[a] * coords[a, 1]
+        detJ = np.linalg.det(J)
+        invJ = np.linalg.inv(J)
+        xg = sum(N[a] * coords[a, 0] for a in range(4))
+        yg = sum(N[a] * coords[a, 1] for a in range(4))
+        CT = C0 + CX * xg + CY * yg
+        # accumulate
+        for i in range(nn):
+            for j in range(nn):
+                mass_ij = N[i] * N[j] * CT * detJ
+                if itype == 0:
+                    ELM[i, j] += mass_ij
+                else:
+                    # map to DOFs
+                    ELM[2 * i, 2 * j] += mass_ij
+                    ELM[2 * i + 1, 2 * j + 1] += mass_ij
+    return ELM
+
 # Convenience wrapper selecting by NPE
 def element_matrices(coords: np.ndarray, npe: int, itype: int = 0,
                      material: Optional[np.ndarray] = None,
                      coeffs: Optional[dict] = None):  # type: ignore
+    """Dispatch to the appropriate element stiffness/load routine.
+
+    Returns (ELK, ELF) pair.  
+    """
     if npe == 3:
         return triangle_element_matrices(coords, itype, material, coeffs or {})
     if npe == 4:

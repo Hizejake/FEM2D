@@ -1,0 +1,25 @@
+FEM2D DYN PLATE TEST - RECTANGULAR - DAMPING - EXAMPLE             
+3 1 1 0
+1 4 1 1
+2 2
+0.0 1.0 1.0
+0.0 1.0 1.0
+0
+0
+
+# Material properties for plate bending (E1 E2 ANU12 G12 G13 G23 THKNS)
+210000.0 210000.0 0.3 80000.0 80000.0 80000.0 0.01
+
+# Continuous source terms (F0,FX,FY)
+0.0 0.0 0.0
+
+# Damping coefficients C0, CX, CY
+100.0 0.0 0.0
+
+# Time stepping: NTIME NSTP INTVL INTIAL
+50 25 1 0
+
+# DT ALFA GAMA EPSLN
+0.01 0.5 0.25 1.0E-6
+
+# End of input
