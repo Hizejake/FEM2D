@@ -335,7 +335,9 @@ def triangle_element_mass(coords: np.ndarray,
     ELM = np.zeros((nn, nn), dtype=float)
     for i in range(nn):
         for j in range(nn):
-            S00 = (1.0 / 3.0) if i == j else (1.0 / 6.0)
+            # Consistent mass for linear triangle:
+            # integral(Ni*Nj)dA = A/6 (i=j), A/12 (i!=j)
+            S00 = (1.0 / 6.0) if i == j else (1.0 / 12.0)
             ELM[i, j] = CT * S00 * area
     # if elasticity, expand to 2*nn x 2*nn, mass on diagonal DOFs
     if itype == 2:
@@ -351,7 +353,7 @@ def triangle_element_mass(coords: np.ndarray,
         M3 = np.zeros((9, 9), dtype=float)
         for a in range(3):
             for b in range(3):
-                S00 = (1.0 / 3.0) if a == b else (1.0 / 6.0)
+                S00 = (1.0 / 6.0) if a == b else (1.0 / 12.0)
                 ia = 3 * a
                 ib = 3 * b
                 M3[ia, ib] = CT * S00 * area

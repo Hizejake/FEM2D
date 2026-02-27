@@ -365,6 +365,8 @@ def read_inp(filepath: str) -> FEM2DConfig:
     item = int(tokens[idx + 2])
     neign = int(tokens[idx + 3])
     idx += 4
+    if item == 0:
+        neign = 0
     
     # Fortran line 165 (conditional on NEIGN != 0)
     nvalu = nvctr = None
@@ -471,23 +473,23 @@ def read_inp(filepath: str) -> FEM2DConfig:
             vspv = np.array([float(tokens[idx + i]) for i in range(nspv)])
             idx += nspv
     
-    # Fortran line 248: READ(IN,*) NSSV
-    nssv = int(tokens[idx])
-    idx += 1
-    
     issv = np.array([], dtype=int).reshape(0, 2)
     vssv = None
-    
-    if nssv > 0:
-        # Fortran line 250: READ(IN,*) ((ISSV(I,J), J=1,2), I=1,NSSV)
-        issv = np.zeros((nssv, 2), dtype=int)
-        for i in range(nssv):
-            issv[i, 0] = int(tokens[idx])
-            issv[i, 1] = int(tokens[idx + 1])
-            idx += 2
+
+    if neign == 0:
+        # Fortran line 248: READ(IN,*) NSSV
+        nssv = int(tokens[idx])
+        idx += 1
         
-        # Fortran line 251: (only if NEIGN == 0)
-        if neign == 0:
+        if nssv > 0:
+            # Fortran line 250: READ(IN,*) ((ISSV(I,J), J=1,2), I=1,NSSV)
+            issv = np.zeros((nssv, 2), dtype=int)
+            for i in range(nssv):
+                issv[i, 0] = int(tokens[idx])
+                issv[i, 1] = int(tokens[idx + 1])
+                idx += 2
+            
+            # Fortran line 251
             vssv = np.array([float(tokens[idx + i]) for i in range(nssv)])
             idx += nssv
     
@@ -640,13 +642,14 @@ def read_inp(filepath: str) -> FEM2DConfig:
         convection.tinf = tinf
     
     # ========== BLOCK 7: Source/Load Terms ==========
-    # Fortran line ~327 (or earlier in conditional blocks): READ(IN,*) F0, FX, FY
-    f0 = float(tokens[idx])
-    fx = float(tokens[idx + 1])
-    fy = float(tokens[idx + 2])
-    idx += 3
-    
-    source_loads = SourceAndLoads(f0, fx, fy)
+    # Fortran reads source terms only when NEIGN == 0.
+    source_loads = None
+    if neign == 0:
+        f0 = float(tokens[idx])
+        fx = float(tokens[idx + 1])
+        fy = float(tokens[idx + 2])
+        idx += 3
+        source_loads = SourceAndLoads(f0, fx, fy)
     
     # ========== BLOCK 8: Dynamic/Transient Parameters (if ITEM != 0) ==========
     dynamic = None
@@ -670,39 +673,48 @@ def read_inp(filepath: str) -> FEM2DConfig:
                 cx = (thkns ** 2) * c0 / 12.0
                 cy = cx
         
-        # Fortran line ~332: READ(IN,*) NTIME, NSTP, INTVL, INTIAL
-        ntime = int(tokens[idx])
-        nstp = int(tokens[idx + 1])
-        intvl = int(tokens[idx + 2])
-        intial = int(tokens[idx + 3])
-        idx += 4
-        
-        # Fortran line ~334: READ(IN,*) DT, ALFA, GAMA, EPSLN
-        dt = float(tokens[idx])
-        alfa = float(tokens[idx + 1])
-        gama = float(tokens[idx + 2])
-        epsln = float(tokens[idx + 3])
-        idx += 4
-        
-        # Optional: Initial conditions (if INTIAL != 0 and ITEM in [1, 2])
-        initial_u = None
-        initial_v = None
-        initial_a = None
-        
-        if intial != 0:
-            neq = element_mesh.nnm * ndf
+        # Fortran does not read time-marching parameters for eigen runs.
+        if neign != 0:
+            dynamic = DynamicParameters(
+                c0=c0, cx=cx, cy=cy,
+                ntime=0, nstp=0, intvl=1, intial=0,
+                dt=0.0, alfa=0.0, gama=0.0, epsln=0.0,
+                initial_u=None, initial_v=None, initial_a=None,
+            )
+        else:
+            # Fortran line ~332: READ(IN,*) NTIME, NSTP, INTVL, INTIAL
+            ntime = int(tokens[idx])
+            nstp = int(tokens[idx + 1])
+            intvl = int(tokens[idx + 2])
+            intial = int(tokens[idx + 3])
+            idx += 4
             
-            # Fortran line ~339: READ(IN,*) (GLU(I), I=1,NEQ)
-            initial_u = np.array([float(tokens[idx + i]) for i in range(neq)])
-            idx += neq
+            # Fortran line ~334: READ(IN,*) DT, ALFA, GAMA, EPSLN
+            dt = float(tokens[idx])
+            alfa = float(tokens[idx + 1])
+            gama = float(tokens[idx + 2])
+            epsln = float(tokens[idx + 3])
+            idx += 4
             
-            if item == 2:
-                # Fortran line (later): Initial velocity
-                initial_v = np.array([float(tokens[idx + i]) for i in range(neq)])
+            # Optional: Initial conditions (if INTIAL != 0 and ITEM in [1, 2])
+            initial_u = None
+            initial_v = None
+            initial_a = None
+            
+            if intial != 0:
+                neq = element_mesh.nnm * ndf
+                
+                # Fortran line ~339: READ(IN,*) (GLU(I), I=1,NEQ)
+                initial_u = np.array([float(tokens[idx + i]) for i in range(neq)])
                 idx += neq
-        
-        dynamic = DynamicParameters(c0, cx, cy, ntime, nstp, intvl, intial, 
-                                     dt, alfa, gama, epsln, initial_u, initial_v, initial_a)
+                
+                if item == 2:
+                    # Fortran line (later): Initial velocity
+                    initial_v = np.array([float(tokens[idx + i]) for i in range(neq)])
+                    idx += neq
+            
+            dynamic = DynamicParameters(c0, cx, cy, ntime, nstp, intvl, intial, 
+                                         dt, alfa, gama, epsln, initial_u, initial_v, initial_a)
     
     # ========== Assemble Final Configuration ==========
     neq = element_mesh.nnm * ndf if element_mesh.nnm else 0
