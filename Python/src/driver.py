@@ -12,10 +12,11 @@ The driver intentionally keeps a clear sequence to mirror the Fortran program fl
 """
 from typing import Optional, Tuple, Any
 import numpy as np
+from pathlib import Path
 from .assemble import assemble_global, assemble_mass_global
 from .boundary import apply_neumann_bc, apply_convection_bc, apply_dirichlet_bc, _map_dof
 from .solver import solve_dense
-from .post import extract_nodal_field
+from .post import extract_nodal_field, write_fortran_style_output_txt
 from .io import BoundaryConditions, ConvectionBC, read_inp
 from .mesh import generate_mesh_from_config
 from .material import compute_cmat_from_config
@@ -115,36 +116,48 @@ def solve_dynamic(nod: np.ndarray,
     dt = dyn.get('dt', 1.0) if dyn else 1.0
     alfa = dyn.get('alfa', 0.25) if dyn else 0.25
     gama = dyn.get('gama', 0.5) if dyn else 0.5
+    item_mode = dyn.get('item', 2) if dyn else 2
     ntime = dyn.get('ntime', 1) if dyn else 1
     nstp = dyn.get('nstp', ntime + 1) if dyn else ntime + 1
 
     A1 = alfa * dt
     A2 = (1.0 - alfa) * dt
-    DT2 = dt * dt
-    A3 = 2.0 / (gama * DT2)
-    A4 = A3 * dt
-    A5 = 1.0 / gama - 1.0
+    if item_mode == 1:
+        # Fortran TEMPORAL(), ITEM=1 (alfa-family for parabolic equations).
+        Khat = M + A1 * K
+        for step in range(1, ntime + 1):
+            F_step = F if step < nstp else np.zeros_like(F)
+            rhs = (A1 + A2) * F_step + (M - A2 * K) @ u
+            if C is not None:
+                rhs = rhs + C @ u
+            u = solve_dense(Khat, rhs)
+    else:
+        # Fortran TEMPORAL(), ITEM=2 (Newmark family for hyperbolic equations).
+        DT2 = dt * dt
+        A3 = 2.0 / (gama * DT2)
+        A4 = A3 * dt
+        A5 = 1.0 / gama - 1.0
 
-    Khat = K + A3 * M
-    if C is not None:
-        Khat = Khat + A4 * C
-
-    for step in range(1, ntime + 1):
-        F_step = F if step < nstp else np.zeros_like(F)
-        rhs = F_step + M @ (A3 * u + A4 * v + A5 * a)
+        Khat = K + A3 * M
         if C is not None:
-            rhs = rhs + C @ v
-        u_next = solve_dense(Khat, rhs)
-        a_next = A3 * (u_next - u) - A4 * v - A5 * a
-        v_next = v + A1 * a_next + A2 * a
-        u, v, a = u_next, v_next, a_next
+            Khat = Khat + A4 * C
+
+        for step in range(1, ntime + 1):
+            F_step = F if step < nstp else np.zeros_like(F)
+            rhs = F_step + M @ (A3 * u + A4 * v + A5 * a)
+            if C is not None:
+                rhs = rhs + C @ v
+            u_next = solve_dense(Khat, rhs)
+            a_next = A3 * (u_next - u) - A4 * v - A5 * a
+            v_next = v + A1 * a_next + A2 * a
+            u, v, a = u_next, v_next, a_next
 
     field = extract_nodal_field(u, ndf)
     return u, field
 
 
-def solve_from_inp(filepath: str) -> Tuple[np.ndarray, np.ndarray, Any]:
-    """Parse an INP file and solve using the matching static/dynamic path."""
+def solve_from_inp(filepath: str, output_txt_path: Optional[str] = None) -> Tuple[np.ndarray, np.ndarray, Any]:
+    """Parse an INP file, solve, and write a Fortran-style text output file."""
     cfg = read_inp(filepath)
     mesh = generate_mesh_from_config(cfg)
 
@@ -172,6 +185,7 @@ def solve_from_inp(filepath: str) -> Tuple[np.ndarray, np.ndarray, Any]:
 
     if cfg.problem_type.item != 0:
         dyn = {
+            'item': cfg.problem_type.item,
             'C0': cfg.dynamic.c0 if cfg.dynamic else 1.0,
             'CX': cfg.dynamic.cx if cfg.dynamic else 0.0,
             'CY': cfg.dynamic.cy if cfg.dynamic else 0.0,
@@ -217,5 +231,16 @@ def solve_from_inp(filepath: str) -> Tuple[np.ndarray, np.ndarray, Any]:
             bc=cfg.boundary_conditions,
             convection=cfg.convection,
         )
+
+    if output_txt_path is None:
+        inp = Path(filepath)
+        output_txt_path = str(inp.with_name(f"{inp.stem}_python_output.txt"))
+    final_time = None
+    final_step = None
+    if cfg.problem_type.item != 0 and cfg.dynamic is not None:
+        final_step = cfg.dynamic.ntime
+        final_time = cfg.dynamic.ntime * cfg.dynamic.dt
+    write_fortran_style_output_txt(output_txt_path, cfg, mesh.glxy, field, final_time, final_step)
+
     return u, field, cfg
 
