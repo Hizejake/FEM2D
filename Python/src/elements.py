@@ -237,8 +237,41 @@ def quad_element_matrices(coords: np.ndarray,
             for a in range(4):
                 ELF[2*a] += F0 * N[a] * detJ
                 ELF[2*a+1] += 0.0
-        elif itype in (3, 4):
-            # Mindlin plate with DOFs [w, theta_x, theta_y] at each node.
+        elif itype == 3:
+            # Fortran ELKMFRCT (ITYPE=3): full integration of bending terms
+            # on rotational DOFs only, then reduced integration of shear terms.
+            if isinstance(material, dict):
+                D_b = np.asarray(material.get('CMAT', np.eye(3)), dtype=float)
+            else:
+                D_b = np.asarray(material if material is not None else np.eye(3), dtype=float)
+            c11 = float(D_b[0, 0])
+            c12 = float(D_b[0, 1])
+            c22 = float(D_b[1, 1])
+            c33 = float(D_b[2, 2])
+
+            for i in range(nn):
+                ii = 3 * i
+                for j in range(nn):
+                    jj = 3 * j
+                    s11 = dNdx[0, i] * dNdx[0, j] * detJ
+                    s22 = dNdx[1, i] * dNdx[1, j] * detJ
+                    s12 = dNdx[0, i] * dNdx[1, j] * detJ
+                    s21 = dNdx[1, i] * dNdx[0, j] * detJ
+
+                    ELK[ii + 1, jj + 1] += c11 * s11 + c33 * s22
+                    ELK[ii + 1, jj + 2] += c12 * s12 + c33 * s21
+                    ELK[ii + 2, jj + 1] += c33 * s12 + c12 * s21
+                    ELK[ii + 2, jj + 2] += c33 * s11 + c22 * s22
+
+            F0 = coeffs.get('F0', 0.0) if coeffs else 0.0
+            FX = coeffs.get('FX', 0.0) if coeffs else 0.0
+            FY = coeffs.get('FY', 0.0) if coeffs else 0.0
+            xg = sum(N[a] * coords[a, 0] for a in range(4))
+            yg = sum(N[a] * coords[a, 1] for a in range(4))
+            q = F0 + FX * xg + FY * yg
+            for a in range(4):
+                ELF[3 * a] += q * N[a] * detJ
+        elif itype == 4:
             Bb = np.zeros((3, 12), dtype=float)
             for a in range(4):
                 ia = 3 * a
@@ -264,8 +297,8 @@ def quad_element_matrices(coords: np.ndarray,
         else:
             raise NotImplementedError(f"ITYPE {itype} not implemented for quad")
 
-    if itype in (3, 4):
-        # Reduced integration for shear terms to limit locking.
+    if itype == 3:
+        # Fortran ELKMFRCT reduced integration (IPDR=1 for NPE=4): shear terms.
         xi = 0.0
         eta = 0.0
         weight = 4.0
@@ -287,22 +320,32 @@ def quad_element_matrices(coords: np.ndarray,
             dNdx[0, a] = grad[0]
             dNdx[1, a] = grad[1]
 
-        Bs = np.zeros((2, 12), dtype=float)
-        for a in range(4):
-            ia = 3 * a
-            Bs[0, ia] = dNdx[0, a]
-            Bs[0, ia + 1] = N[a]
-            Bs[1, ia] = dNdx[1, a]
-            Bs[1, ia + 2] = N[a]
-
         if isinstance(material, dict):
             c44 = float(material.get('C44', 0.0))
             c55 = float(material.get('C55', 0.0))
         else:
             c44 = 0.0
             c55 = 0.0
-        D_s = np.array([[c55, 0.0], [0.0, c44]], dtype=float)
-        ELK += Bs.T @ D_s @ Bs * detJ * weight
+        cnst = detJ * weight
+        for i in range(nn):
+            ii = 3 * i
+            for j in range(nn):
+                jj = 3 * j
+                s11 = dNdx[0, i] * dNdx[0, j] * cnst
+                s22 = dNdx[1, i] * dNdx[1, j] * cnst
+                s00 = N[i] * N[j] * cnst
+                s10 = dNdx[0, i] * N[j] * cnst
+                s01 = N[i] * dNdx[0, j] * cnst
+                s20 = dNdx[1, i] * N[j] * cnst
+                s02 = N[i] * dNdx[1, j] * cnst
+
+                ELK[ii, jj] += c55 * s11 + c44 * s22
+                ELK[ii, jj + 1] += c55 * s10
+                ELK[ii + 1, jj] += c55 * s01
+                ELK[ii, jj + 2] += c44 * s20
+                ELK[ii + 2, jj] += c44 * s02
+                ELK[ii + 1, jj + 1] += c55 * s00
+                ELK[ii + 2, jj + 2] += c44 * s00
 
     return ELK, ELF
 
@@ -378,6 +421,7 @@ def quad_element_mass(coords: np.ndarray,
     C0 = dyn.get('C0', 1.0) if dyn else 1.0
     CX = dyn.get('CX', 0.0) if dyn else 0.0
     CY = dyn.get('CY', 0.0) if dyn else 0.0
+    NEIGN = dyn.get('NEIGN', dyn.get('neign', 0)) if dyn else 0
 
     gauss = [(-1/np.sqrt(3), -1/np.sqrt(3)), (1/np.sqrt(3), -1/np.sqrt(3)),
              (1/np.sqrt(3), 1/np.sqrt(3)), (-1/np.sqrt(3), 1/np.sqrt(3))]
@@ -405,7 +449,21 @@ def quad_element_mass(coords: np.ndarray,
                 elif itype == 2:
                     ELM[2 * i, 2 * j] += mass_ij
                     ELM[2 * i + 1, 2 * j + 1] += mass_ij
-                elif itype in (3, 4):
+                elif itype == 3:
+                    if NEIGN <= 1:
+                        s00 = N[i] * N[j] * detJ
+                        ELM[3 * i, 3 * j] += C0 * s00
+                        ELM[3 * i + 1, 3 * j + 1] += CX * s00
+                        ELM[3 * i + 2, 3 * j + 2] += CY * s00
+                    else:
+                        grad_i = invJ @ np.array([dNdxi[i], dNdeta[i]])
+                        grad_j = invJ @ np.array([dNdxi[j], dNdeta[j]])
+                        s11 = grad_i[0] * grad_j[0] * detJ
+                        s22 = grad_i[1] * grad_j[1] * detJ
+                        s12 = grad_i[0] * grad_j[1] * detJ
+                        s21 = grad_i[1] * grad_j[0] * detJ
+                        ELM[3 * i, 3 * j] += C0 * s11 + CX * s22 + CY * (s12 + s21)
+                elif itype == 4:
                     ELM[3 * i, 3 * j] += mass_ij
                     ELM[3 * i + 1, 3 * j + 1] += N[i] * N[j] * CX * detJ
                     ELM[3 * i + 2, 3 * j + 2] += N[i] * N[j] * CY * detJ

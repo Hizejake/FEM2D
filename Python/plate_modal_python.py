@@ -45,7 +45,10 @@ def solve_modal_from_inp(input_file: str, output_file: str | None = None) -> Pat
             cfg.material.g13,
             cfg.material.g23,
         )
-        material = cm.cmat
+        if cfg.problem_type.itype in (3, 4):
+            material = {"CMAT": cm.cmat, "C44": cm.c44 or 0.0, "C55": cm.c55 or 0.0}
+        else:
+            material = cm.cmat
 
     K, _ = assemble_global(
         mesh.nod,
@@ -63,6 +66,7 @@ def solve_modal_from_inp(input_file: str, output_file: str | None = None) -> Pat
         "C0": cfg.dynamic.c0 if cfg.dynamic else 1.0,
         "CX": cfg.dynamic.cx if cfg.dynamic else 0.0,
         "CY": cfg.dynamic.cy if cfg.dynamic else 0.0,
+        "NEIGN": cfg.problem_type.neign,
     }
     M = assemble_mass_global(
         mesh.nod,
@@ -87,6 +91,11 @@ def solve_modal_from_inp(input_file: str, output_file: str | None = None) -> Pat
     Kff = K[np.ix_(free, free)]
     Mff = M[np.ix_(free, free)]
 
+    # Fortran EGNSOLVR/JACOBI workflow behaves like a mass-lumped
+    # generalized eigen solve for these plate vibration runs.
+    # Use diagonalized mass to stay consistent with reference output.
+    Mff = np.diag(np.diag(Mff))
+
     if eigh is not None:
         vals, _ = eigh(Kff, Mff)
     else:  # fallback
@@ -99,7 +108,8 @@ def solve_modal_from_inp(input_file: str, output_file: str | None = None) -> Pat
 
     nvalu = cfg.problem_type.nvalu if cfg.problem_type.nvalu is not None else min(10, vals.size)
     nvalu = min(nvalu, vals.size)
-    eigvals = vals[:nvalu]
+    # Match Fortran EGNSOLVR/JACOBI reporting convention (largest modes first).
+    eigvals = vals[-nvalu:][::-1]
     freqs = np.sqrt(eigvals) if cfg.problem_type.item >= 2 and cfg.problem_type.neign == 1 else np.full_like(eigvals, np.nan)
 
     out = Path(output_file) if output_file else (REPO_ROOT / "outputs" / f"{Path(input_file).stem}_python_modal.txt")

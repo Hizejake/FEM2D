@@ -186,6 +186,7 @@ def solve_from_inp(filepath: str, output_txt_path: Optional[str] = None) -> Tupl
     if cfg.problem_type.item != 0:
         dyn = {
             'item': cfg.problem_type.item,
+            'neign': cfg.problem_type.neign,
             'C0': cfg.dynamic.c0 if cfg.dynamic else 1.0,
             'CX': cfg.dynamic.cx if cfg.dynamic else 0.0,
             'CY': cfg.dynamic.cy if cfg.dynamic else 0.0,

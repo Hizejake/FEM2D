@@ -669,9 +669,10 @@ def read_inp(filepath: str) -> FEM2DConfig:
                 cx = thkns * cx
                 cy = thkns * cy
             else:
-                c0 = thkns * c0
-                cx = (thkns ** 2) * c0 / 12.0
-                cy = cx
+                if neign <= 1:
+                    c0 = thkns * c0
+                    cx = (thkns ** 2) * c0 / 12.0
+                    cy = cx
         
         # Fortran does not read time-marching parameters for eigen runs.
         if neign != 0:
